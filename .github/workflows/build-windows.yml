@@ -36,8 +36,10 @@ jobs:
           echo "$env:CARGO_HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
         shell: pwsh
 
-      - name: Setup CMake + Ninja
+      - name: Setup CMake + Ninja (disable built-in cloud cache to avoid cache v2)
         uses: lukka/get-cmake@latest
+        with:
+          useCloudCache: false
 
       - name: Setup Vulkan SDK
         uses: humbletim/setup-vulkan-sdk@v1.2.0
