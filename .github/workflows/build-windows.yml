@@ -1,142 +1,245 @@
-name: Build whisper-desktop v3.0.1 Windows | CUDA12.4 sm60 | NoAVX2 Standard
+name: Build Windows Portable (P100 / CUDA 12.4 / no AVX2)
+
+# 触发方式：
+#   1. Actions 页面手动 Run workflow（在线编译，产物从 Artifacts 下载）
+#   2. 推送 v* 标签时额外创建 draft release
 on:
   workflow_dispatch:
   push:
-    branches: [ v3.0.1 ]
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
-  build-windows:
+  build-windows-portable:
+    name: windows-portable (x86_64, P100 sm_60, CUDA 12.4, no AVX2)
     runs-on: windows-2022
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - name: Checkout v3.0.1 + recursive whisper.cpp submodule
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
 
-      - name: Setup Node.js
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: 'npm'
 
-      - name: Load MSVC 2022 x64
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Install Rust stable
-        run: |
-          $env:RUSTUP_HOME = "$env:GITHUB_WORKSPACE\.rustup"
-          $env:CARGO_HOME = "$env:GITHUB_WORKSPACE\.cargo"
-          Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
-          .\rustup-init.exe -y --default-toolchain stable --target x86_64-pc-windows-msvc --no-modify-path
-          echo "$env:CARGO_HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-        shell: pwsh
-
-      # 替换掉 lukka/get-cmake，使用无v2-cache依赖的setup-cmake
-      - name: Setup CMake
-        uses: jwlawson/actions-setup-cmake@v1.13
-        with:
-          cmake-version: '3.29.x'
-
-      - name: Install Ninja
-        run: |
-          Invoke-WebRequest -Uri https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip -OutFile ninja.zip
-          Expand-Archive ninja.zip -DestinationPath ninja -Force
-          echo "$env:GITHUB_WORKSPACE\ninja" | Out-File -FilePath $env:GITHUB_PATH -Append
-
-      - name: Setup Vulkan SDK
-        uses: humbletim/setup-vulkan-sdk@v1.2.0
-        with:
-          vulkan-version: 1.3.268.0
-          platform: windows
-
-      - name: Install CUDA 12.4.0 (Chocolatey, retry 2 times)
-        run: |
-          $retry = 0
-          $success = $false
-          while ($retry -lt 2 -and (-not $success)) {
-            try {
-              choco install cuda --version=12.4.0 -y --no-progress
-              $success = $true
-            } catch {
-              $retry +=1
-              Start-Sleep -Seconds 20
-            }
-          }
-          if (-not $success) { throw "CUDA install failed after retry" }
-          echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" | Out-File -FilePath $env:GITHUB_ENV -Append
-          echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-        shell: pwsh
-
-      - name: Verify nvcc
-        run: nvcc --version
-
-      # 1. whisper-cli-standard.exe No AVX2，AVX baseline
-      - name: Build whisper-cli-standard.exe (No AVX2)
-        run: |
-          cd whisper.cpp
-          cmake -B build-standard -G Ninja `
-            -DGGML_NO_AVX2=ON `
-            -DGGML_CPU_HAS_AVX2=OFF `
-            -DCMAKE_CXX_FLAGS="/arch:AVX" `
-            -DCMAKE_C_FLAGS="/arch:AVX" `
-            -DWHISPER_BUILD_CLI=ON `
-            -DGGML_CUDA=OFF `
-            -DGGML_VULKAN=OFF `
-            -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-standard -j
-          if (!(Test-Path ../src-tauri/resources)) { New-Item -ItemType Directory -Path ../src-tauri/resources -Force }
-          if (!(Test-Path build-standard/bin/whisper-cli.exe)) { throw "standard whisper-cli.exe missing!" }
-          copy build-standard/bin/whisper-cli.exe ../src-tauri/resources/whisper-cli-standard.exe
-
-      # 2. whisper-cli-cuda.exe P100 sm_60
-      - name: Build whisper-cli-cuda.exe (CUDA12.4 sm_60)
-        run: |
-          cd whisper.cpp
-          cmake -B build-cuda -G Ninja `
-            -DGGML_CUDA=ON `
-            -DCMAKE_CUDA_ARCHITECTURES="60" `
-            -DWHISPER_BUILD_CLI=ON `
-            -DGGML_VULKAN=OFF `
-            -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-cuda -j
-          if (!(Test-Path build-cuda/bin/whisper-cli.exe)) { throw "cuda whisper-cli.exe missing!" }
-          copy build-cuda/bin/whisper-cli.exe ../src-tauri/resources/whisper-cli-cuda.exe
-
-      # 3. whisper-cli-vulkan.exe
-      - name: Build whisper-cli-vulkan.exe
-        run: |
-          cd whisper.cpp
-          cmake -B build-vulkan -G Ninja `
-            -DGGML_VULKAN=ON `
-            -DWHISPER_BUILD_CLI=ON `
-            -DGGML_CUDA=OFF `
-            -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-vulkan -j
-          if (!(Test-Path build-vulkan/bin/whisper-cli.exe)) { throw "vulkan whisper-cli.exe missing!" }
-          copy build-vulkan/bin/whisper-cli.exe ../src-tauri/resources/whisper-cli-vulkan.exe
-
-      - name: Install fixed Tauri CLI 2.0.0-beta.21
-        run: cargo install tauri-cli --version "2.0.0-beta.21" --force
-
-      - name: Npm install frontend deps
+      - name: Install frontend dependencies
         run: npm ci
 
-      - name: Tauri build
-        run: |
-          cd src-tauri
-          cargo tauri build
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # --- CUDA 12.4 (12.4 系列维护版 12.4.1；如需严格 12.4.0 改下面版本号即可) ---
+      - name: Install CUDA Toolkit 12.4 (Windows)
+        uses: Jimver/cuda-toolkit@v0.2.35
+        id: cuda-toolkit-windows
+        with:
+          cuda: '12.4.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "visual_studio_integration"]'
 
-      - name: Upload artifacts
+      # --- WHISPER.CPP：版本检测 + 缓存 ---
+      - name: Detect Latest whisper.cpp Tag
+        id: whisper_tag
+        shell: bash
+        run: |
+          LATEST_TAG=$(git ls-remote --tags --refs https://github.com/ggml-org/whisper.cpp.git | awk -F/ '{print $3}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="v1.7.4"
+          fi
+          echo "tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          echo "Detected whisper.cpp tag: $LATEST_TAG"
+
+      - name: Cache Whisper Binaries
+        id: whisper-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            whisper-bins/**
+            cuda-dlls/**
+          key: whisper-win64-sm60-cuda12.4-noavx2-${{ steps.whisper_tag.outputs.tag }}-v1
+
+      - name: Clone whisper.cpp
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          git clone --depth 1 --branch "${{ steps.whisper_tag.outputs.tag }}" https://github.com/ggml-org/whisper.cpp.git whisper.cpp-src
+
+      # 公共 CPU 选项：关闭所有可选指令集扩展，x86_64 基线只保留 SSE4.2（2008 年 Nehalem 及以后均支持）。
+      # 若目标 CPU 连 SSE4.2 都不支持，把 -DGGML_SSE42=ON 改成 OFF（回退到 x86_64 原生 SSE2）。
+      - name: Build whisper-cli Standard CPU (no AVX2)
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          cmake -G "Visual Studio 17 2022" -A x64 -B whisper.cpp-src/build-standard -S whisper.cpp-src `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DGGML_NATIVE=OFF `
+            -DGGML_SSE42=ON `
+            -DGGML_AVX=OFF `
+            -DGGML_AVX2=OFF `
+            -DGGML_FMA=OFF `
+            -DGGML_F16C=OFF `
+            -DGGML_AVX512=OFF `
+            -DGGML_OPENMP=ON `
+            -DBUILD_SHARED_LIBS=OFF
+          cmake --build whisper.cpp-src/build-standard -j --config Release --target whisper-cli
+
+      - name: Build whisper-cli CUDA (P100 sm_60, no AVX2)
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          # 复制 CUDA 的 MSBuild 自定义项，保证 VS 生成器能识别 CUDA
+          $env:CUDACXX = "$env:CUDA_PATH\bin\nvcc.exe"
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vsWhere) {
+            $vsPath = & $vsWhere -latest -version "[17.0,18.0)" -property installationPath
+            if (-not $vsPath) { $vsPath = & $vsWhere -latest -property installationPath }
+            $msbuildDirs = Get-ChildItem -Path "$vsPath\MSBuild\Microsoft\VC" -Directory -Recurse -Filter "BuildCustomizations" -ErrorAction SilentlyContinue
+            $cudaMsbuild = "$env:CUDA_PATH\extras\visual_studio_integration\MSBuildExtensions"
+            if (Test-Path $cudaMsbuild) {
+              foreach ($dir in $msbuildDirs) {
+                Copy-Item -Path "$cudaMsbuild\*" -Destination $dir.FullName -Force -ErrorAction SilentlyContinue
+              }
+            }
+          }
+
+          # Tesla P100 = Pascal compute capability 6.0 -> 只生成 sm_60 代码
+          # runner 上的 VS 版本可能新于 CUDA 12.4 官方支持矩阵，加 -allow-unsupported-compiler 绕过版本检查
+          cmake -G "Visual Studio 17 2022" -A x64 -B whisper.cpp-src/build-cuda -S whisper.cpp-src `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DGGML_NATIVE=OFF `
+            -DGGML_SSE42=ON `
+            -DGGML_AVX=OFF `
+            -DGGML_AVX2=OFF `
+            -DGGML_FMA=OFF `
+            -DGGML_F16C=OFF `
+            -DGGML_AVX512=OFF `
+            -DGGML_OPENMP=ON `
+            -DGGML_CUDA=ON `
+            -DCMAKE_CUDA_ARCHITECTURES=60 `
+            -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler" `
+            -DBUILD_SHARED_LIBS=OFF
+          cmake --build whisper.cpp-src/build-cuda -j --config Release --target whisper-cli
+
+      - name: Harvest CUDA runtime DLLs and OpenMP runtime
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path whisper-bins/standard | Out-Null
+          New-Item -ItemType Directory -Force -Path whisper-bins/cuda | Out-Null
+          New-Item -ItemType Directory -Force -Path cuda-dlls | Out-Null
+
+          Copy-Item "whisper.cpp-src/build-standard/bin/Release/whisper-cli.exe" "whisper-bins/standard/whisper-cli-standard.exe" -Force
+          Copy-Item "whisper.cpp-src/build-cuda/bin/Release/whisper-cli.exe" "whisper-bins/cuda/whisper-cli-cuda.exe" -Force
+
+          # CUDA 12.4 运行时：cudart / cublas / cublasLt / nvJitLink
+          if ($env:CUDA_PATH) {
+            Copy-Item "$env:CUDA_PATH\bin\cudart64_*.dll"    cuda-dlls/ -ErrorAction SilentlyContinue -Force
+            Copy-Item "$env:CUDA_PATH\bin\cublas64_*.dll"    cuda-dlls/ -ErrorAction SilentlyContinue -Force
+            Copy-Item "$env:CUDA_PATH\bin\cublasLt64_*.dll"  cuda-dlls/ -ErrorAction SilentlyContinue -Force
+            Copy-Item "$env:CUDA_PATH\bin\nvJitLink*.dll"     cuda-dlls/ -ErrorAction SilentlyContinue -Force
+          }
+
+          # OpenMP 运行时（GGML_OPENMP=ON 时两个 whisper-cli 都依赖它）
+          $vcompDll = Get-ChildItem -Path "$env:ProgramFiles/Microsoft Visual Studio" -Filter "vcomp140.dll" -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "x64" } | Select-Object -First 1
+          if ($vcompDll) {
+            Copy-Item $vcompDll.FullName "whisper-bins/standard/vcomp140.dll" -Force
+            Copy-Item $vcompDll.FullName "whisper-bins/cuda/vcomp140.dll" -Force
+          }
+
+      # --- FFMPEG / FFPROBE ---
+      - name: Cache FFmpeg Binaries
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ffmpeg-bins/**
+          key: ffmpeg-win64-v1
+
+      - name: Download FFmpeg (Windows full build)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ffmpeg-bins | Out-Null
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z" -OutFile "ffmpeg.7z"
+          7z x ffmpeg.7z -offmpeg-extracted -y
+          $binFolder = Get-ChildItem -Path "ffmpeg-extracted" -Recurse -Directory -Filter "bin" | Select-Object -First 1
+          Copy-Item -Path "$($binFolder.FullName)\ffmpeg.exe"  -Destination "ffmpeg-bins/ffmpeg.exe"
+          Copy-Item -Path "$($binFolder.FullName)\ffprobe.exe" -Destination "ffmpeg-bins/ffprobe.exe"
+          Remove-Item -Recurse -Force "ffmpeg.7z", "ffmpeg-extracted"
+
+      # --- 版本号 ---
+      - name: Extract App Version
+        id: app_version
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # --- 准备 src-tauri/resources（保持与原项目一致的后端目录结构）---
+      - name: Prepare Tauri resources
+        shell: pwsh
+        run: |
+          $res = "src-tauri/resources"
+          Remove-Item -Path "$res/*" -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "$res/fonts", "$res/standard", "$res/vulkan", "$res/openvino", "$res/cuda" | Out-Null
+          New-Item -ItemType File -Force -Path "$res/vulkan/.keep", "$res/openvino/.keep" | Out-Null
+
+          Copy-Item "whisper-bins/standard/*" "$res/standard/" -Recurse -Force
+          Copy-Item "whisper-bins/cuda/*"     "$res/cuda/" -Recurse -Force
+          Copy-Item "cuda-dlls/*"             "$res/cuda/" -Recurse -Force
+          Copy-Item "ffmpeg-bins/ffmpeg.exe"  "$res/" -Force
+          Copy-Item "ffmpeg-bins/ffprobe.exe" "$res/" -Force
+          Copy-Item "src/fonts/*"             "$res/fonts/" -Recurse -ErrorAction SilentlyContinue
+
+          # 预下载 VC++ 2015-2022 运行库安装器，目标机器缺运行库时可直接安装
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "$res/vc_redist.x64.exe"
+
+      # --- 只编译主程序，不打 NSIS/MSI 安装包 ---
+      - name: Build Tauri Application (no bundle)
+        shell: pwsh
+        env:
+          NO_STRIP: 'true'
+        run: |
+          npm run tauri build -- --no-bundle
+
+      # --- 组装便携目录并打 ZIP ---
+      - name: Assemble Portable ZIP
+        shell: pwsh
+        run: |
+          $version = "${{ steps.app_version.outputs.version }}"
+          $portableDir = "WhisperDesktop_${version}_win64_p100-cuda12.4-portable"
+          Remove-Item -Path $portableDir -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+
+          # 定位主 exe（兼容不同命名）
+          $mainExe = Get-ChildItem -Path "src-tauri/target/release/*.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match "whisper" } | Select-Object -First 1
+          if (-not $mainExe) { throw "未找到 Tauri 主程序 exe，请检查 src-tauri/target/release 输出" }
+          Copy-Item $mainExe.FullName "$portableDir/whisper-desktop.exe" -Force
+
+          Copy-Item "src-tauri/resources" "$portableDir/resources" -Recurse -Force
+
+          New-Item -ItemType Directory -Force -Path "artifacts" | Out-Null
+          7z a -tzip "artifacts/$portableDir.zip" "./$portableDir/*"
+          Remove-Item -Path $portableDir -Recurse -Force
+
+      - name: Upload Portable Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: whisper-desktop-v3.0.1-win-x64-cuda124-noavx2
-          path: |
-            src-tauri/target/release/bundle/
-            src-tauri/resources/whisper-cli-*.exe
+          name: WhisperDesktop-Windows-Portable-P100
+          path: artifacts/*.zip
+          retention-days: 30
+
+      # 推送 v* 标签时，把便携 ZIP 附到 draft release（仓库名自动取当前 fork，无需硬编码）
+      - name: Create Draft Release and Upload ZIP
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: 'Whisper Desktop ${{ github.ref_name }} (P100 portable)'
+          draft: true
+          prerelease: false
+          files: artifacts/*.zip
