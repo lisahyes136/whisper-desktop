@@ -1,0 +1,135 @@
+name: Build whisper-desktop v3.0.1 Windows | CUDA12.4 sm60 | NoAVX2 Standard
+on:
+  workflow_dispatch:
+  push:
+    branches: [ v3.0.1 ]
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout v3.0.1 + recursive whisper.cpp submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: Load MSVC 2022 x64
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Rust stable
+        run: |
+          $env:RUSTUP_HOME = "$env:GITHUB_WORKSPACE\.rustup"
+          $env:CARGO_HOME = "$env:GITHUB_WORKSPACE\.cargo"
+          Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
+          .\rustup-init.exe -y --default-toolchain stable --target x86_64-pc-windows-msvc --no-modify-path
+          echo "$env:CARGO_HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+        shell: pwsh
+
+      - name: Setup CMake + Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Setup Vulkan SDK
+        uses: humbletim/setup-vulkan-sdk@v1.2.0
+        with:
+          vulkan-version: 1.3.268.0
+          platform: windows
+
+      - name: Install CUDA 12.4.0 (Chocolatey, retry 2 times)
+        run: |
+          $retry = 0
+          $success = $false
+          while ($retry -lt 2 -and (-not $success)) {
+            try {
+              choco install cuda --version=12.4.0 -y --no-progress
+              $success = $true
+            } catch {
+              $retry +=1
+              Start-Sleep -Seconds 20
+            }
+          }
+          if (-not $success) { throw "CUDA install failed after retry" }
+          echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+        shell: pwsh
+
+      - name: Verify nvcc
+        run: nvcc --version
+
+      # 1. whisper-cli-standard.exe No AVX2，AVX baseline
+      - name: Build whisper-cli-standard.exe (No AVX2)
+        run: |
+          cd whisper.cpp
+          cmake -B build-standard -G Ninja `
+            -DGGML_NO_AVX2=ON `
+            -DGGML_CPU_HAS_AVX2=OFF `
+            -DCMAKE_CXX_FLAGS="/arch:AVX" `
+            -DCMAKE_C_FLAGS="/arch:AVX" `
+            -DWHISPER_BUILD_CLI=ON `
+            -DGGML_CUDA=OFF `
+            -DGGML_VULKAN=OFF `
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-standard -j
+          if (!(Test-Path ../src-tauri/resources)) { New-Item -ItemType Directory -Path ../src-tauri/resources -Force }
+          if (!(Test-Path build-standard/bin/whisper-cli.exe)) { throw "standard whisper-cli.exe missing!" }
+          copy build-standard/bin/whisper-cli.exe ../src-tauri/resources/whisper-cli-standard.exe
+
+      # 2. whisper-cli-cuda.exe P100 sm_60
+      - name: Build whisper-cli-cuda.exe (CUDA12.4 sm_60)
+        run: |
+          cd whisper.cpp
+          cmake -B build-cuda -G Ninja `
+            -DGGML_CUDA=ON `
+            -DCMAKE_CUDA_ARCHITECTURES="60" `
+            -DWHISPER_BUILD_CLI=ON `
+            -DGGML_VULKAN=OFF `
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-cuda -j
+          if (!(Test-Path build-cuda/bin/whisper-cli.exe)) { throw "cuda whisper-cli.exe missing!" }
+          copy build-cuda/bin/whisper-cli.exe ../src-tauri/resources/whisper-cli-cuda.exe
+
+      # 3. whisper-cli-vulkan.exe
+      - name: Build whisper-cli-vulkan.exe
+        run: |
+          cd whisper.cpp
+          cmake -B build-vulkan -G Ninja `
+            -DGGML_VULKAN=ON `
+            -DWHISPER_BUILD_CLI=ON `
+            -DGGML_CUDA=OFF `
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-vulkan -j
+          if (!(Test-Path build-vulkan/bin/whisper-cli.exe)) { throw "vulkan whisper-cli.exe missing!" }
+          copy build-vulkan/bin/whisper-cli.exe ../src-tauri/resources/whisper-cli-vulkan.exe
+
+      - name: Install fixed Tauri CLI 2.0.0-beta.21
+        run: cargo install tauri-cli --version "2.0.0-beta.21" --force
+
+      - name: Npm install frontend deps
+        run: npm ci
+
+      - name: Tauri build
+        run: |
+          cd src-tauri
+          cargo tauri build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: whisper-desktop-v3.0.1-win-x64-cuda124-noavx2
+          path: |
+            src-tauri/target/release/bundle/
+            src-tauri/resources/whisper-cli-*.exe
