@@ -36,10 +36,17 @@ jobs:
           echo "$env:CARGO_HOME\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
         shell: pwsh
 
-      - name: Setup CMake + Ninja (disable built-in cloud cache to avoid cache v2)
-        uses: lukka/get-cmake@latest
+      # 替换掉 lukka/get-cmake，使用无v2-cache依赖的setup-cmake
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v1.13
         with:
-          useCloudCache: false
+          cmake-version: '3.29.x'
+
+      - name: Install Ninja
+        run: |
+          Invoke-WebRequest -Uri https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip -OutFile ninja.zip
+          Expand-Archive ninja.zip -DestinationPath ninja -Force
+          echo "$env:GITHUB_WORKSPACE\ninja" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Setup Vulkan SDK
         uses: humbletim/setup-vulkan-sdk@v1.2.0
